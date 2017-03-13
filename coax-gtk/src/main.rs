@@ -14,6 +14,7 @@ extern crate fnv;
 extern crate futures;
 extern crate futures_spawn;
 extern crate futures_threadpool;
+extern crate gdk;
 extern crate gdk_pixbuf;
 extern crate gio;
 extern crate glib;

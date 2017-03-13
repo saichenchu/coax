@@ -31,6 +31,7 @@ fnv                = ">= 1.0"
 futures            = ">= 0.1"
 futures-spawn      = ">= 0.1"
 futures-threadpool = ">= 0.1"
+gdk                = { git = "https://github.com/gtk-rs/gdk" }
 gdk-pixbuf         = { git = "https://github.com/gtk-rs/gdk-pixbuf" }
 gio                = { git = "https://github.com/gtk-rs/gio" }
 glib               = { git = "https://github.com/gtk-rs/glib" }

@@ -28,6 +28,7 @@ use coax_client::client::Client;
 use coax_client::listen::Listener;
 use coax_data::{self as data, Database, Connection, Conversation, User, ConvStatus};
 use coax_data::{MessageStatus, MessageData, NewMessage, QueueItem, QueueItemData};
+use coax_data::{NewAsset, AssetStatus, AssetType};
 use coax_data::db::{self, PagingState};
 use coax_net::http::tls::{Tls, TlsStream};
 use coax_ws::io::{Error as WsError};
@@ -38,6 +39,8 @@ use cryptobox::{CBox, CBoxSession};
 use cryptobox::store::file::FileStore;
 use json::{ToJson, Encoder, Decoder};
 use json::decoder::ReadIter;
+use openssl::hash::{Hasher, MessageDigest};
+use openssl::symm;
 use proteus::keys::MAX_PREKEY_ID;
 use proteus::keys::PreKeyId;
 use protobuf::{self, Message};
@@ -528,23 +531,28 @@ impl Actor<Online> {
         Ok(Inbox::new(&self.logger, actor))
     }
 
+    /// Load asset data.
+    pub fn load_asset(&mut self, k: &AssetKey, t: Option<&AssetToken>) -> Result<Vec<u8>, Error> {
+        self.state.user.assets.push(k.as_str());
+        let file = error::retry3x(|r: Option<React<()>>| {
+            self.react(r)?;
+            let ref p = self.state.user.assets;
+            let creds = self.state.user.creds.lock().unwrap();
+            load_asset(&self.logger, &mut self.state.client, p, k, t, &creds.token)
+        });
+        self.state.user.assets.pop();
+        let mut data = Vec::new();
+        if let Some(mut f) = file? {
+            f.read_to_end(&mut data)?;
+        }
+        Ok(data)
+    }
+
     /// Load user icon asset.
     pub fn load_user_icon(&mut self, u: &User) -> Result<Vec<u8>, Error> {
         debug!(&self.logger, "loading user icon"; "id" => u.id.to_string());
         if let Some(ref i) = u.icon {
-            self.state.user.assets.push(i.as_str());
-            let file = error::retry3x(|r: Option<React<()>>| {
-                self.react(r)?;
-                let ref p = self.state.user.assets;
-                let creds = self.state.user.creds.lock().unwrap();
-                load_asset(&self.logger, &mut self.state.client, p, i, None, &creds.token)
-            });
-            self.state.user.assets.pop();
-            let mut data = Vec::new();
-            if let Some(mut f) = file? {
-                f.read_to_end(&mut data)?;
-            }
-            Ok(data)
+            self.load_asset(i, None)
         } else {
             Ok(Vec::new())
         }
@@ -1304,6 +1312,61 @@ impl Actor<Online> {
                             self.state.bcast.send(Pkg::MessageUpdate(cid, id, e.time, MessageStatus::Delivered)).unwrap()
                         }
                     }
+                } else if plain.text.has_asset() {
+                    debug!(self.logger, "asset");
+                    let mut asset = plain.text.take_asset();
+                    if !asset.has_uploaded() || !asset.has_original() {
+                        debug!(self.logger, "asset not uploaded or not original"; "msg" => mid);
+                        return Ok(())
+                    }
+                    if !asset.get_uploaded().has_asset_id() {
+                        debug!(self.logger, "asset without key"; "msg" => mid);
+                        return Ok(())
+                    }
+                    let     orig  = asset.take_original();
+                    let mut data  = asset.take_uploaded();
+                    let asset_key = AssetKey::new(data.take_asset_id());
+                    let asset_tkn =
+                        if data.has_asset_token() {
+                            Some(AssetToken::new(data.take_asset_token()))
+                        } else {
+                            None
+                        };
+                    debug!(self.logger, "asset data";
+                           "id"        => asset_key.as_str(),
+                           "mime-type" => orig.get_mime_type(),
+                           "size"      => orig.get_size());
+                    if orig.has_image() {
+                        {
+                            let mut nast = NewAsset::new(&asset_key, AssetType::Image, AssetStatus::Remote, data.get_otr_key(), data.get_sha256());
+                            if let Some(ref at) = asset_tkn {
+                                nast.set_token(at)
+                            }
+                            self.state.user.dbase.insert_asset(&nast)?;
+
+                            let mut nmsg = NewMessage::asset(&mid, &e.id, &e.time, &e.from, &msg.sender, &asset_key);
+                            nmsg.set_status(MessageStatus::Received);
+                            self.state.user.dbase.insert_message(&nmsg)?;
+                        }
+                        let ast = data::Asset {
+                            id:     asset_key,
+                            atype:  AssetType::Image,
+                            status: AssetStatus::Remote,
+                            token:  asset_tkn,
+                            key:    data.take_otr_key(),
+                            cksum:  data.take_sha256()
+                        };
+                        let msg = data::Message {
+                            id:     mid,
+                            conv:   e.id,
+                            time:   e.time,
+                            user:   usr,
+                            client: Some(msg.sender),
+                            status: MessageStatus::Received,
+                            data:   MessageData::Asset(ast)
+                        };
+                        self.state.bcast.send(Pkg::Message(msg)).unwrap()
+                    }
                 } else {
                     error!(self.logger, "unsupported message type"); // TODO
                 }
@@ -1432,6 +1495,21 @@ impl<S> Actor<S> {
         }
         Ok(root)
     }
+}
+
+pub fn decrypt_asset(input: &[u8], csum: &[u8], key: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut h = Hasher::new(MessageDigest::sha256())?;
+    h.update(input)?;
+    let sha256 = h.finish()?;
+    if sha256 != csum {
+        return Err(Error::Message("asset checksum check failed"))
+    }
+    if input.len() < 16 || input.len() % 8 != 0 {
+        return Err(Error::Message("encrypted asset data length invalid"))
+    }
+    let iv   = &input[0 .. 16];
+    let data = &input[16 .. input.len()];
+    symm::decrypt(symm::Cipher::aes_256_cbc(), key, Some(iv), data).map_err(From::from)
 }
 
 const MY_CLIENT_ID: &'static str = "my-client-id";

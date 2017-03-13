@@ -12,6 +12,7 @@ extern crate coax_ws;
 extern crate cookie;
 extern crate cryptobox;
 extern crate json;
+extern crate openssl;
 extern crate proteus;
 extern crate protobuf;
 #[macro_use]

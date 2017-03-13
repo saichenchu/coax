@@ -273,6 +273,7 @@ impl Channel {
 #[derive(Debug, Clone)]
 pub enum Message {
     Text(TextMessage),
+    Image(Image),
     Date(DateHeader),
     System(SystemMessage)
 }
@@ -280,6 +281,10 @@ pub enum Message {
 impl Message {
     pub fn text(dt: Option<DateTime<Local>>, u: &mut res::User, txt: &str) -> Message {
         Message::Text(TextMessage::new(dt, u, txt))
+    }
+
+    pub fn image(dt: DateTime<Local>, u: &mut res::User, img: gtk::Image) -> Message {
+        Message::Image(Image::new(dt, u, img))
     }
 
     pub fn date(d: Date<Local>) -> Message {
@@ -293,6 +298,7 @@ impl Message {
     pub fn row(&self) -> &gtk::ListBoxRow {
         match *self {
             Message::Text(ref msg)   => &msg.row,
+            Message::Image(ref msg)  => &msg.row,
             Message::Date(ref msg)   => &msg.row,
             Message::System(ref msg) => &msg.row
         }
@@ -301,6 +307,7 @@ impl Message {
     pub fn index(&self) -> i32 {
         match *self {
             Message::Text(ref msg)   => msg.row.get_index(),
+            Message::Image(ref msg)  => msg.row.get_index(),
             Message::Date(ref msg)   => msg.row.get_index(),
             Message::System(ref msg) => msg.row.get_index()
         }
@@ -320,7 +327,6 @@ pub struct TextMessage {
     datetime:  Option<DateTime<Local>>,
     row:       gtk::ListBoxRow,
     grid:      gtk::Grid,
-    icon:      gtk::Image,
     time:      gtk::Label,
     delivered: bool
 }
@@ -335,8 +341,7 @@ impl TextMessage {
         grid.set_margin_bottom(6);
         grid.set_column_spacing(12);
 
-        let img = u.icon_small();
-        grid.attach(&img, 0, 0, 1, 1);
+        grid.attach(&u.icon_small(), 0, 0, 1, 1);
 
         let nme = gtk::Label::new(Some(u.name.as_ref()));
         nme.set_name("text-sender");
@@ -371,7 +376,6 @@ impl TextMessage {
             datetime:  dt,
             row:       row,
             grid:      grid,
-            icon:      img,
             time:      time,
             delivered: false
         }
@@ -425,6 +429,58 @@ impl TextMessage {
     pub fn stop_spinner(&self) {
         if let Some(w) = self.grid.get_child_at(2, 0) {
             self.grid.remove(&w)
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Image {
+    datetime: DateTime<Local>,
+    row:      gtk::ListBoxRow,
+    grid:     gtk::Grid,
+    time:     gtk::Label
+}
+
+impl Image {
+    pub fn new(dt: DateTime<Local>, u: &mut res::User, img: gtk::Image) -> Image {
+        let row = gtk::ListBoxRow::new();
+        let grid = gtk::Grid::new();
+        grid.set_margin_left(6);
+        grid.set_margin_top(6);
+        grid.set_margin_right(6);
+        grid.set_margin_bottom(6);
+        grid.set_column_spacing(12);
+
+        let ico = u.icon_small();
+        grid.attach(&ico, 0, 0, 1, 1);
+
+        let nme = gtk::Label::new(Some(u.name.as_ref()));
+        nme.set_name("text-sender");
+        nme.set_tooltip_text(u.handle.as_ref().map(|h| h.as_ref()));
+        nme.set_halign(Align::Start);
+        grid.attach(&nme, 1, 0, 1, 1);
+
+        let time = gtk::Label::new(None);
+        time.set_name("text-time");
+        time.get_style_context().map(|ctx| ctx.add_class("dim-label"));
+        let tstr = dt.format("%T").to_string();
+        time.set_text(&tstr);
+        grid.attach(&time, 2, 0, 1, 1);
+
+        img.set_margin_top(6);
+        img.set_margin_bottom(6);
+        img.set_hexpand(true);
+        img.set_vexpand(true);
+        grid.attach(&img, 1, 2, 1, 1);
+
+        row.add(&grid);
+        row.show_all();
+
+        Image {
+            datetime: dt,
+            row:      row,
+            grid:     grid,
+            time:     time
         }
     }
 }

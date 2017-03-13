@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use chrono::{DateTime, UTC};
 use coax_api as api;
 use coax_api::types::{ConvId, UserId, ClientId, NotifId};
-use coax_api::user::ConnectStatus;
+use coax_api::user::{AssetKey, ConnectStatus};
 use diesel::{self, insert, delete, update};
 use diesel::connection::SimpleConnection;
 use diesel::expression::sql_literal::sql;
@@ -20,6 +20,7 @@ use model::{self, NewMember, NewVar, MessageStatus, ConvStatus};
 use model::{NewUser, NewClient, NewConnection, NewConversation, NewNotification};
 use model::{RawUser, RawClient, RawConnection, RawConversation, RawMessage};
 use model::{NewQueueItem, QueueItem, QueueItemType, RawQueueItem};
+use model::RawAsset;
 use schema;
 use slog::Logger;
 use util::as_id;
@@ -426,9 +427,15 @@ impl Database {
             Ok(mm) => {
                 let mut vec = Vec::with_capacity(mm.len());
                 for (m, s) in mm {
+                    let a =
+                        if let Some(ref ai) = m.asset {
+                            self.asset(&AssetKey::new(ai.as_ref()))?
+                        } else {
+                            None
+                        };
                     match m.user_id.as_ref().map(|xs| UserId::from_bytes(xs)) {
-                        None            => vec.push(m.to_message(s.to_user()?, None)?),
-                        Some(Some(uid)) => vec.push(m.to_message(s.to_user()?, self.user(&uid)?)?),
+                        None            => vec.push(m.to_message(s.to_user()?, None, a)?),
+                        Some(Some(uid)) => vec.push(m.to_message(s.to_user()?, self.user(&uid)?, a)?),
                         Some(None)      => {
                             error!(self.logger, "invalid messages.user_id"; "conv" => cid.to_string());
                             return Err(Error::InvalidData("messages.user_id"))
@@ -483,6 +490,24 @@ impl Database {
             Err(e)  => Err(Error::Result(e)),
             Ok(cid) => as_id(&cid, "conversation id").map(Some)
         }
+    }
+
+    /// Select `Asset`
+    pub fn asset<'a>(&self, aid: &AssetKey) -> Result<Option<model::Asset<'a>>, Error> {
+        use schema::assets::dsl::*;
+        debug!(self.logger, "select asset"; "id" => aid.as_str());
+        match assets.find(aid.as_str()).first::<RawAsset>(&self.conn) {
+            Err(result::Error::NotFound) => Ok(None),
+            Err(e)                       => Err(Error::Result(e)),
+            Ok(a)                        => a.to_asset().map(Some)
+        }
+    }
+
+    /// Insert a new asset.
+    pub fn insert_asset(&self, na: &model::NewAsset) -> Result<(), Error> {
+        debug!(self.logger, "insert asset"; "id" => na.id, "status" => na.status);
+        insert_or_replace(na).into(schema::assets::table).execute(&self.conn)?;
+        Ok(())
     }
 
     /// Select value by lookup key.
