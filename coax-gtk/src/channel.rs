@@ -283,10 +283,6 @@ impl Message {
         Message::Text(TextMessage::new(dt, u, txt))
     }
 
-    pub fn image(dt: DateTime<Local>, u: &mut res::User, img: gtk::Image) -> Message {
-        Message::Image(Image::new(dt, u, img))
-    }
-
     pub fn date(d: Date<Local>) -> Message {
         Message::Date(DateHeader::new(d))
     }
@@ -437,12 +433,13 @@ impl TextMessage {
 pub struct Image {
     datetime: DateTime<Local>,
     row:      gtk::ListBoxRow,
+    image:    gtk::DrawingArea,
     grid:     gtk::Grid,
     time:     gtk::Label
 }
 
 impl Image {
-    pub fn new(dt: DateTime<Local>, u: &mut res::User, img: gtk::Image) -> Image {
+    pub fn new(dt: DateTime<Local>, u: &mut res::User, img: gtk::DrawingArea) -> Image {
         let row = gtk::ListBoxRow::new();
         let grid = gtk::Grid::new();
         grid.set_margin_left(6);
@@ -479,9 +476,34 @@ impl Image {
         Image {
             datetime: dt,
             row:      row,
+            image:    img,
             grid:     grid,
             time:     time
         }
+    }
+
+    pub fn start_spinner(&self) {
+        let spinner = gtk::Spinner::new();
+        spinner.set_margin_left(12);
+        spinner.set_margin_top(12);
+        spinner.set_margin_right(12);
+        spinner.set_margin_bottom(12);
+        spinner.set_hexpand(true);
+        spinner.set_vexpand(true);
+        spinner.set_size_request(32, 32);
+        spinner.start();
+        if let Some(w) = self.grid.get_child_at(1, 2) {
+            self.grid.remove(&w)
+        }
+        spinner.show();
+        self.grid.attach(&spinner, 1, 2, 1, 1)
+    }
+
+    pub fn stop_spinner(&self) {
+        if let Some(w) = self.grid.get_child_at(1, 2) {
+            self.grid.remove(&w)
+        }
+        self.grid.attach(&self.image, 1, 2, 1, 1)
     }
 }
 

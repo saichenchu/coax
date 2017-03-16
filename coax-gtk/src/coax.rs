@@ -1,6 +1,5 @@
 use std;
 use std::cell::RefCell;
-use std::cmp::min;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::ffi::CString;
@@ -11,10 +10,10 @@ use std::sync::mpsc::{channel, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use channel::{Channel, Message, TextMessage};
+use channel::{Channel, Message, TextMessage, Image};
 use chrono::{DateTime, Local, UTC};
 use coax_actor::{Actor, Error, Pkg, Delivery};
-use coax_actor::actor::{self, Init, Connected, Offline, Online};
+use coax_actor::actor::{Init, Connected, Offline, Online};
 use coax_actor::config;
 use coax_api::conv::ConvType;
 use coax_api::message::send;
@@ -23,7 +22,7 @@ use coax_api::user::{self, ConnectStatus};
 use coax_api_proto::{Builder as MsgBuilder, GenericMessage};
 use coax_client::error::{Error as ClientError};
 use coax_data::{self, User, Conversation, Connection, MessageData, MessageStatus, ConvStatus};
-use coax_data::AssetType;
+use coax_data::{AssetStatus, AssetType};
 use coax_data::profiles::ProfileDb;
 use coax_net::http::tls;
 use contact::Contacts;
@@ -32,7 +31,7 @@ use futures::{self, Future};
 use futures_spawn::SpawnHelper;
 use futures_threadpool::{self as pool, ThreadPool};
 use gdk::prelude::ContextExt;
-use gdk_pixbuf::{InterpType, PixbufLoader};
+use gdk_pixbuf::{InterpType, Pixbuf};
 use gio::{self, MenuModel, SimpleAction};
 use glib_sys;
 use gtk::prelude::*;
@@ -716,9 +715,11 @@ impl Coax {
                             ch.push_msg(&m.id, Message::text(Some(mtime), &mut usr, &txt)),
                         MessageData::Asset(ast) => {
                             if ast.atype == AssetType::Image {
-                                let img = gtk::Image::new();
-                                ch.push_msg(&m.id, Message::image(mtime, &mut usr, img.clone()));
-                                let future = self.set_image(ast, img)
+                                let img = gtk::DrawingArea::new();
+                                let msg = Image::new(mtime, &mut usr, img.clone());
+                                msg.start_spinner();
+                                ch.push_msg(&m.id, Message::Image(msg));
+                                let future = self.set_image(ast, m.conv.clone(), m.id.clone(), img)
                                     .map_err(with!(logger => move |e| {
                                         error!(logger, "failed to set image"; "error" => format!("{:?}", e))
                                     }));
@@ -1023,42 +1024,47 @@ impl Coax {
     // Futures
     //
 
-    fn set_image(&self, ast: coax_data::Asset<'static>, img: gtk::Image) -> impl Future<Item=(), Error=Error> {
+    fn set_image(&self, ast: coax_data::Asset<'static>, c: ConvId, m: String, img: gtk::DrawingArea) -> impl Future<Item=(), Error=Error> {
+        let this  = self.clone();
         let actor = self.actor.clone();
         self.pool_loc.spawn_fn(move || {
                 let mut act = actor.lock().unwrap();
                 match *act {
                     Some(Io::Online(ref mut a)) => {
-                        let data = a.load_asset(&ast.id, ast.token.as_ref())?;
-                        actor::decrypt_asset(&data, &ast.cksum, &ast.key)
+                        a.download_asset(&ast.id, ast.token.as_ref())?;
+                        if ast.status != AssetStatus::Local {
+                            a.decrypt_asset(&ast.id, &ast.cksum, &ast.key)?;
+                        }
+                        Ok(a.asset_path(&ast.id))
                     }
                     _ => Err(Error::Message("invalid app state"))
                 }
             })
-            .map(move |data| {
-                let loader = PixbufLoader::new();
-                loader.loader_write(&data).unwrap(); // TODO
-                loader.close().unwrap(); // TODO
-                let buf    = loader.get_pixbuf().unwrap(); // TODO
+            .map(with!(this => move |path| {
+                if let Some(ch) = this.channels.borrow().get(&c) {
+                    ch.get_msg(&m).map(|msg| if let Message::Image(ref m) = *msg { m.stop_spinner() });
+                }
+                let buf    = Pixbuf::new_from_file(path.to_string_lossy().as_ref()).unwrap(); // TODO
                 let width  = buf.get_width();
                 let height = buf.get_height();
                 let w      = img.get_allocated_width();
                 let h      = w * height / width;
-                img.set_size_request(w, h);
+                img.set_size_request(-1, h);
                 img.connect_draw(move |img, ctx| {
                     let w = img.get_allocated_width();
                     let h = w * height / width;
-                    img.set_size_request(min(w, width), min(h, height));
-                    if w < width && h < height {
+                    if w < width {
+                        img.set_size_request(-1, h);
                         let b = buf.scale_simple(w, h, InterpType::Bilinear).unwrap(); // TODO
                         ctx.set_source_pixbuf(&b, 0.0, 0.0);
                     } else {
+                        img.set_size_request(-1, height);
                         ctx.set_source_pixbuf(&buf, 0.0, 0.0)
                     }
                     ctx.paint();
                     gtk::Inhibit(false)
                 });
-            })
+            }))
     }
 
     fn set_user_icon(&self, u: UserId) -> impl Future<Item=(), Error=Error> {
@@ -1233,14 +1239,15 @@ impl Coax {
                                 Message::Text(msg)
                             }
                             MessageData::Asset(ast) => {
-                                let img = gtk::Image::new();
-                                let msg = Message::image(local, &mut usr, img.clone());
-                                let future = this.set_image(ast, img)
+                                let img = gtk::DrawingArea::new();
+                                let msg = Image::new(local, &mut usr, img.clone());
+                                msg.start_spinner();
+                                let future = this.set_image(ast, cid.clone(), m.id.clone(), img)
                                     .map_err(with!(this => move |e| {
                                         error!(this.log, "failed to set image"; "error" => format!("{:?}", e))
                                     }));
                                 this.futures.send(boxed(future)).unwrap();
-                                msg
+                                Message::Image(msg)
                             }
                             MessageData::MemberJoined(None) =>
                                 Message::system(local, &format!("{} has joined this conversation.", usr.name)),

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Cursor, Read};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
@@ -41,11 +41,12 @@ use json::{ToJson, Encoder, Decoder};
 use json::decoder::ReadIter;
 use openssl::hash::{Hasher, MessageDigest};
 use openssl::symm;
+use pkg::Pkg;
 use proteus::keys::MAX_PREKEY_ID;
 use proteus::keys::PreKeyId;
 use protobuf::{self, Message};
 use slog::Logger;
-use pkg::Pkg;
+use tempdir::TempDir;
 use url::Url;
 
 pub struct Actor<S> {
@@ -417,9 +418,13 @@ impl Actor<Offline> {
         debug!(self.logger, "loading user icon"; "id" => u.id.to_string());
         if let Some(ref i) = u.icon {
             self.state.user.assets.push(i.as_str());
-            let file = {
-                let ref p = self.state.user.assets;
-                read_asset(&self.logger, p, i)
+            let file: Result<Option<File>, Error> = {
+                debug!(self.logger, "reading asset (locally)"; "key" => i.as_str());
+                if self.state.user.assets.exists() {
+                    File::open(&self.state.user.assets).map(Some).map_err(From::from)
+                } else {
+                    Ok(None)
+                }
             };
             self.state.user.assets.pop();
             let mut data = Vec::new();
@@ -531,28 +536,90 @@ impl Actor<Online> {
         Ok(Inbox::new(&self.logger, actor))
     }
 
-    /// Load asset data.
-    pub fn load_asset(&mut self, k: &AssetKey, t: Option<&AssetToken>) -> Result<Vec<u8>, Error> {
-        self.state.user.assets.push(k.as_str());
-        let file = error::retry3x(|r: Option<React<()>>| {
-            self.react(r)?;
-            let ref p = self.state.user.assets;
-            let creds = self.state.user.creds.lock().unwrap();
-            load_asset(&self.logger, &mut self.state.client, p, k, t, &creds.token)
-        });
-        self.state.user.assets.pop();
-        let mut data = Vec::new();
-        if let Some(mut f) = file? {
-            f.read_to_end(&mut data)?;
-        }
-        Ok(data)
+    pub fn asset_path(&mut self, k: &AssetKey) -> PathBuf {
+        self.state.user.assets.join(k.as_str())
     }
 
-    /// Load user icon asset.
+    pub fn download_asset(&mut self, k: &AssetKey, t: Option<&AssetToken>) -> Result<(), Error> {
+        debug!(self.logger, "downloading asset"; "key" => k.as_str());
+        self.state.user.assets.push(k.as_str());
+        if self.state.user.assets.exists() {
+            debug!(self.logger, "asset already downloaded"; "key" => k.as_str());
+            self.state.user.assets.pop();
+            return Ok(())
+        }
+        let result = error::retry3x(|r: Option<React<()>>| {
+            self.react(r)?;
+            let creds = self.state.user.creds.lock().unwrap();
+            let url = self.state.client.asset_url(k, t, &creds.token)?;
+            debug!(self.logger, "fetching asset"; "url" => format!("{}", url));
+            let dom = url.host_str().ok_or(Error::Message("missing host in asset url"))?;
+            let (mut rpc, tkn) = self.state.client.prepare_download(&url, dom)?;
+            if rpc.response().status() != 200 {
+                return Err(io::Error::new(io::ErrorKind::NotFound, "asset not found").into())
+            }
+            let mut r = rpc.reader(tkn).map_err(|e| ClientError::Rpc(e) : ClientError<Void>)?;
+            let temp  = TempDir::new_in(&self.config.data.root, "coax")?;
+            let path  = temp.path().join(k.as_str());
+            {
+                let mut f = File::create(&path)?;
+                io::copy(&mut r, &mut f)?;
+            }
+            fs::rename(&path, &self.state.user.assets)?;
+            Ok(())
+        });
+        self.state.user.assets.pop();
+        result
+    }
+
+    pub fn decrypt_asset(&mut self, k: &AssetKey, cksum: &[u8], key: &[u8]) -> Result<(), Error> {
+        let input = {
+            let mut c = io::Cursor::new(Vec::new());
+            self.state.user.assets.push(k.as_str());
+            let f = File::open(&self.state.user.assets);
+            self.state.user.assets.pop();
+            io::copy(&mut f?, &mut c)?;
+            c.into_inner()
+        };
+        let mut h = Hasher::new(MessageDigest::sha256())?;
+        h.update(&input)?;
+        let sha256 = h.finish()?;
+        if sha256 != cksum {
+            return Err(Error::Message("asset checksum check failed"))
+        }
+        if input.len() < 16 || input.len() % 8 != 0 {
+            return Err(Error::Message("encrypted asset data length invalid"))
+        }
+        let iv    = &input[0 .. 16];
+        let data  = &input[16 .. input.len()];
+        let plain = symm::decrypt(symm::Cipher::aes_256_cbc(), key, Some(iv), data)?;
+        let temp  = TempDir::new_in(&self.config.data.root, "coax")?;
+        let path  = temp.path().join(k.as_str());
+        {
+            let mut f = File::create(&path)?;
+            io::copy(&mut plain.as_slice(), &mut f)?;
+        }
+        self.state.user.assets.push(k.as_str());
+        let result = fs::rename(&path, &self.state.user.assets);
+        self.state.user.assets.pop();
+        result?;
+        self.state.user.dbase.update_asset_status(k, AssetStatus::Local)?;
+        Ok(())
+    }
+
     pub fn load_user_icon(&mut self, u: &User) -> Result<Vec<u8>, Error> {
         debug!(&self.logger, "loading user icon"; "id" => u.id.to_string());
         if let Some(ref i) = u.icon {
-            self.load_asset(i, None)
+            self.download_asset(i, None)?;
+            let mut file = {
+                self.state.user.assets.push(i.as_str());
+                let f = File::open(&self.state.user.assets);
+                self.state.user.assets.pop();
+                f?
+            };
+            let mut data = Vec::new();
+            file.read_to_end(&mut data)?;
+            Ok(data)
         } else {
             Ok(Vec::new())
         }
@@ -1497,21 +1564,6 @@ impl<S> Actor<S> {
     }
 }
 
-pub fn decrypt_asset(input: &[u8], csum: &[u8], key: &[u8]) -> Result<Vec<u8>, Error> {
-    let mut h = Hasher::new(MessageDigest::sha256())?;
-    h.update(input)?;
-    let sha256 = h.finish()?;
-    if sha256 != csum {
-        return Err(Error::Message("asset checksum check failed"))
-    }
-    if input.len() < 16 || input.len() % 8 != 0 {
-        return Err(Error::Message("encrypted asset data length invalid"))
-    }
-    let iv   = &input[0 .. 16];
-    let data = &input[16 .. input.len()];
-    symm::decrypt(symm::Cipher::aes_256_cbc(), key, Some(iv), data).map_err(From::from)
-}
-
 const MY_CLIENT_ID: &'static str = "my-client-id";
 const ACCESS_TOKEN: &'static str = "access-token";
 const USER_COOKIE: &'static str = "user-cookie";
@@ -1553,37 +1605,6 @@ fn access_token(db: &Database) -> Result<Option<String>, Error> {
 fn set_access_token(db: &Database, t: &AccessToken) -> Result<(), Error> {
     db.set_var(ACCESS_TOKEN, t.token.as_ref().as_bytes())?;
     Ok(())
-}
-
-fn read_asset(g: &Logger, p: &Path, k: &AssetKey) -> Result<Option<File>, Error> {
-    debug!(g, "reading asset (locally)"; "key" => k.as_str(), "path" => format!("{:?}", p.as_os_str()));
-    if p.exists() {
-        File::open(p).map(Some).map_err(From::from)
-    } else {
-        Ok(None)
-    }
-}
-
-fn load_asset(g: &Logger, c: &mut Client, p: &Path, k: &AssetKey, t: Option<&AssetToken>, s: &AccessToken) -> Result<Option<File>, Error> {
-    debug!(g, "loading asset"; "key" => k.as_str(), "path" => format!("{:?}", p.as_os_str()));
-    if p.exists() {
-        return File::open(p).map(Some).map_err(From::from)
-    }
-    let url = c.asset_url(k, t, s)?;
-    debug!(g, "downloading asset"; "url" => format!("{}", url));
-    let dom = url.host_str().ok_or(Error::Message("missing host in asset url"))?;
-    let (mut rpc, tkn) = c.prepare_download(&url, dom)?;
-    if rpc.response().status() != 200 {
-        return Ok(None)
-    }
-    let mut rdr = rpc.reader(tkn).map_err(|e| ClientError::Rpc(e) : ClientError<Void>)?;
-    let tmp = p.with_extension("tmp");
-    {
-        let mut fle = File::create(&tmp)?;
-        io::copy(&mut rdr, &mut fle)?;
-    }
-    fs::rename(&tmp, p)?;
-    File::open(p).map(Some).map_err(From::from)
 }
 
 fn save_message(db: &Database, cid: &ConvId, uid: &UserId, clt: &ClientId, msg: &GenericMessage) -> Result<(), Error> {
