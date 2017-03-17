@@ -383,9 +383,67 @@ impl Coax {
         }));
         self.send_btn.connect_clicked(with!(send => move |_| send.activate(None)));
 
+        let main_pane: gtk::Paned = self.builder.get_object("main-pane").unwrap();
+        let max_left = SimpleAction::new("max_left", None);
+        max_left.connect_activate(with!(main_pane => move |_, _| {
+            if let (Some(c1), Some(c2)) = (main_pane.get_child1(), main_pane.get_child2()) {
+                match (c1.is_visible(), c2.is_visible()) {
+                    (true, true)  => c2.set_visible(false),
+                    (false, _)    => c1.set_visible(true),
+                    _             => {}
+                }
+            }
+        }));
+        let max_right = SimpleAction::new("max_right", None);
+        max_right.connect_activate(move |_, _| {
+            if let (Some(c1), Some(c2)) = (main_pane.get_child1(), main_pane.get_child2()) {
+                match (c1.is_visible(), c2.is_visible()) {
+                    (true, true) => c1.set_visible(false),
+                    (_, false)   => c2.set_visible(true),
+                    _            => {}
+                }
+            }
+        });
+        let right_pane: gtk::Paned = self.builder.get_object("right-pane").unwrap();
+        let max_top = SimpleAction::new("max_top", None);
+        max_top.connect_activate(with!(right_pane => move |_, _| {
+            if !right_pane.is_visible() {
+                return ()
+            }
+            if let (Some(c1), Some(c2)) = (right_pane.get_child1(), right_pane.get_child2()) {
+                match (c1.is_visible(), c2.is_visible()) {
+                    (true, true)  => c2.set_visible(false),
+                    (false, _)    => c1.set_visible(true),
+                    _             => {}
+                }
+            }
+        }));
+        let max_bottom = SimpleAction::new("max_bottom", None);
+        max_bottom.connect_activate(move |_, _| {
+            if !right_pane.is_visible() {
+                return ()
+            }
+            if let (Some(c1), Some(c2)) = (right_pane.get_child1(), right_pane.get_child2()) {
+                match (c1.is_visible(), c2.is_visible()) {
+                    (true, true) => c1.set_visible(false),
+                    (_, false)   => c2.set_visible(true),
+                    _            => {}
+                }
+            }
+        });
+
         window.add_action(&open);
         window.add_action(&send);
+        window.add_action(&max_left);
+        window.add_action(&max_right);
+        window.add_action(&max_top);
+        window.add_action(&max_bottom);
         app.set_accels_for_action("win.send", &["<Shift>Return"]);
+        app.set_accels_for_action("win.open", &["<Ctrl>o"]);
+        app.set_accels_for_action("win.max_left", &["<Alt>Right"]);
+        app.set_accels_for_action("win.max_right", &["<Alt>Left"]);
+        app.set_accels_for_action("win.max_top", &["<Alt>Down"]);
+        app.set_accels_for_action("win.max_bottom", &["<Alt>Up"]);
 
         window.add(&main);
         window.set_titlebar(Some(&bar));
@@ -726,7 +784,14 @@ impl Coax {
                                 self.futures.send(boxed(future)).unwrap()
                             }
                         }
-                        _ => {}
+                        MessageData::MemberJoined(None) =>
+                            ch.push_msg(&m.id, Message::system(mtime, &format!("{} has joined this conversation.", usr.name))),
+                        MessageData::MemberJoined(Some(member)) =>
+                            ch.push_msg(&m.id, Message::system(mtime, &format!("{} has added {} to this conversation.", usr.name, member.name.as_str()))),
+                        MessageData::MemberLeft(None) =>
+                            ch.push_msg(&m.id, Message::system(mtime, &format!("{} has left this conversation.", usr.name))),
+                        MessageData::MemberLeft(Some(member)) =>
+                            ch.push_msg(&m.id, Message::system(mtime, &format!("{} has removed {} from this conversation.", usr.name, member.name.as_str())))
                     }
                 } else {
                     ch.update_time(&mtime)
