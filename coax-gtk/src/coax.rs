@@ -322,7 +322,7 @@ impl Coax {
                     if let Some(ch) = this.channels.borrow().get(id) {
                         if !ch.is_init() {
                             let f =
-                                this.load_messages(id)
+                                this.load_messages(&app, id)
                                     .map_err(with!(this, app => move |e| {
                                         error!(this.log, "failed to load messages"; "error" => format!("{:?}", e));
                                         show_error(&app, &e, "Failed to load messages", &format!("{}", e))
@@ -774,7 +774,7 @@ impl Coax {
                         MessageData::Asset(ast) => {
                             if ast.atype == AssetType::Image {
                                 let img = gtk::DrawingArea::new();
-                                let msg = Image::new(mtime, &mut usr, img.clone());
+                                let msg = Image::new(mtime, &mut usr, img.clone(), app.get_active_window());
                                 msg.start_spinner();
                                 ch.push_msg(&m.id, Message::Image(msg));
                                 let future = self.set_image(ast, m.conv.clone(), m.id.clone(), img)
@@ -1268,7 +1268,7 @@ impl Coax {
             }))
     }
 
-    fn load_messages(&self, cid: &ConvId) -> impl Future<Item=(), Error=Error> {
+    fn load_messages(&self, app: &gtk::Application, cid: &ConvId) -> impl Future<Item=(), Error=Error> {
         debug!(self.log, "load conversation messages"; "id" => cid.to_string());
         let this    = self.clone();
         let actor   = self.actor.clone();
@@ -1281,7 +1281,7 @@ impl Coax {
                     _                            => Err(Error::Message("invalid app state"))
                 }
             })
-            .map(with!(this, cid => move |mm| {
+            .map(with!(this, cid, app => move |mm| {
                 if let Some(mut chan) = this.channels.borrow_mut().get_mut(&cid) {
                     let mut new_content = false;
                     for m in mm.data {
@@ -1305,7 +1305,7 @@ impl Coax {
                             }
                             MessageData::Asset(ast) => {
                                 let img = gtk::DrawingArea::new();
-                                let msg = Image::new(local, &mut usr, img.clone());
+                                let msg = Image::new(local, &mut usr, img.clone(), app.get_active_window());
                                 msg.start_spinner();
                                 let future = this.set_image(ast, cid.clone(), m.id.clone(), img)
                                     .map_err(with!(this => move |e| {

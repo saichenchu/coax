@@ -8,6 +8,7 @@ use coax_api::types::{Name, ConvId};
 use ffi;
 use fnv::FnvHashMap;
 use gdk_pixbuf::{InterpType, Pixbuf};
+use gio;
 use gtk::{self, Align};
 use gtk::prelude::*;
 use res;
@@ -363,7 +364,7 @@ impl TextMessage {
         lbl.set_halign(Align::Fill);
         lbl.set_xalign(0.0);
         lbl.set_line_wrap(true);
-        grid.attach(&lbl, 1, 2, 1, 1);
+        grid.attach(&lbl, 1, 1, 1, 1);
 
         row.add(&grid);
         row.show_all();
@@ -387,7 +388,7 @@ impl TextMessage {
         let tooltip = dt.format("Delivered at %T").to_string();
         check.set_tooltip_text(Some(tooltip.as_ref()));
         check.show();
-        self.grid.attach(&check, 2, 2, 1, 1);
+        self.grid.attach(&check, 2, 1, 1, 1);
         self.delivered = true
     }
 
@@ -439,7 +440,7 @@ pub struct Image {
 }
 
 impl Image {
-    pub fn new(dt: DateTime<Local>, u: &mut res::User, img: gtk::DrawingArea) -> Image {
+    pub fn new(dt: DateTime<Local>, u: &mut res::User, img: gtk::DrawingArea, win: Option<gtk::Window>) -> Image {
         let row = gtk::ListBoxRow::new();
         let grid = gtk::Grid::new();
         grid.set_margin_left(6);
@@ -468,7 +469,34 @@ impl Image {
         img.set_margin_bottom(6);
         img.set_hexpand(true);
         img.set_vexpand(true);
-        grid.attach(&img, 1, 2, 1, 1);
+        grid.attach(&img, 1, 1, 1, 1);
+
+        let menu = gio::Menu::new();
+        menu.append("Save as ...", "image.save");
+
+        let menu_actions = gio::SimpleActionGroup::new();
+
+        let save_action = gio::SimpleAction::new("save", None);
+        save_action.connect_activate(move |_, _| {
+            let dialog = gtk::FileChooserDialog::new(Some("Save as ..."), win.as_ref(), gtk::FileChooserAction::Save);
+            dialog.add_button("Cancel", gtk::ResponseType::Cancel.into());
+            dialog.add_button("Save", gtk::ResponseType::Accept.into());
+            dialog.set_do_overwrite_confirmation(true);
+            if dialog.run() == gtk::ResponseType::Accept.into() {
+                println!("Saving image to {:?}", dialog.get_filename())
+            }
+            dialog.destroy();
+        });
+
+        menu_actions.insert(&save_action);
+
+        let menu_btn = gtk::MenuButton::new();
+        menu_btn.get_style_context().map(|ctx| ctx.add_class("dim-label"));
+        menu_btn.set_valign(Align::Start);
+        menu_btn.set_relief(gtk::ReliefStyle::None);
+        menu_btn.insert_action_group("image", Some(&menu_actions));
+        menu_btn.set_menu_model(Some(&menu));
+        grid.attach(&menu_btn, 2, 1, 1, 1);
 
         row.add(&grid);
         row.show_all();
@@ -492,18 +520,18 @@ impl Image {
         spinner.set_vexpand(true);
         spinner.set_size_request(32, 32);
         spinner.start();
-        if let Some(w) = self.grid.get_child_at(1, 2) {
+        if let Some(w) = self.grid.get_child_at(1, 1) {
             self.grid.remove(&w)
         }
         spinner.show();
-        self.grid.attach(&spinner, 1, 2, 1, 1)
+        self.grid.attach(&spinner, 1, 1, 1, 1)
     }
 
     pub fn stop_spinner(&self) {
-        if let Some(w) = self.grid.get_child_at(1, 2) {
+        if let Some(w) = self.grid.get_child_at(1, 1) {
             self.grid.remove(&w)
         }
-        self.grid.attach(&self.image, 1, 2, 1, 1)
+        self.grid.attach(&self.image, 1, 1, 1, 1)
     }
 }
 
