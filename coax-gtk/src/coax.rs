@@ -28,8 +28,7 @@ use coax_net::http::tls;
 use contact::Contacts;
 use ffi;
 use futures::{self, Future};
-use futures_spawn::SpawnHelper;
-use futures_threadpool::{self as pool, ThreadPool};
+use futures_cpupool::{self as pool, CpuPool};
 use gdk::prelude::ContextExt;
 use gdk_pixbuf::{InterpType, Pixbuf};
 use gio::{self, MenuModel, SimpleAction};
@@ -55,8 +54,8 @@ enum Io {
 #[derive(Clone)]
 pub struct Coax {
     log:      Logger,
-    pool_rem: ThreadPool, // sending & receiving threads (remote)
-    pool_loc: ThreadPool, // threads acting on local state
+    pool_rem: CpuPool, // sending & receiving threads (remote)
+    pool_loc: CpuPool, // threads acting on local state
     futures:  Sender<Box<Future<Item=(), Error=()>>>,
     profiles: Arc<Mutex<ProfileDb>>,
     builder:  gtk::Builder,
@@ -784,14 +783,7 @@ impl Coax {
                                 self.futures.send(boxed(future)).unwrap()
                             }
                         }
-                        MessageData::MemberJoined(None) =>
-                            ch.push_msg(&m.id, Message::system(mtime, &format!("{} has joined this conversation.", usr.name))),
-                        MessageData::MemberJoined(Some(member)) =>
-                            ch.push_msg(&m.id, Message::system(mtime, &format!("{} has added {} to this conversation.", usr.name, member.name.as_str()))),
-                        MessageData::MemberLeft(None) =>
-                            ch.push_msg(&m.id, Message::system(mtime, &format!("{} has left this conversation.", usr.name))),
-                        MessageData::MemberLeft(Some(member)) =>
-                            ch.push_msg(&m.id, Message::system(mtime, &format!("{} has removed {} from this conversation.", usr.name, member.name.as_str())))
+                        _ => {}
                     }
                 } else {
                     ch.update_time(&mtime)
@@ -948,21 +940,22 @@ impl Coax {
         }));
     }
 
-    fn on_members_change(&self, dt: DateTime<UTC>, cid: ConvId, members: Vec<User>, s: ConvStatus, from: User) {
-        debug!(self.log, "on_member_change"; "conv" => cid.to_string());
+    fn on_members_change(&self, dt: DateTime<UTC>, cid: ConvId, members: Vec<User<'static>>, s: ConvStatus, from: User<'static>) {
+        debug!(self.log, "on_members_change"; "conv" => cid.to_string());
         match self.channels.borrow_mut().entry(cid.clone()) {
             Entry::Vacant(_) => {
                 let this   = self.clone();
                 let future = self.conversation(&cid)
                     .map(with!(this => move |conv| {
                         if let Some(c) = conv {
-                            this.on_conversation(c)
+                            this.on_conversation(c);
+                            this.on_members_change(dt, cid, members, s, from)
                         } else {
                             error!(this.log, "Failed to resolve conversation"; "id" => cid.to_string())
                         }
                     }))
                     .map_err(with!(this => move |e| {
-                        error!(this.log, "on_member_change error"; "error" => format!("{}", e))
+                        error!(this.log, "on_members_change error"; "error" => format!("{}", e))
                     }));
                 self.futures.send(boxed(future)).unwrap()
             }

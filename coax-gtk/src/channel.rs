@@ -311,10 +311,11 @@ impl Message {
     }
 
     pub fn datetime(&self) -> Option<&DateTime<Local>> {
-        if let Message::Text(ref msg) = *self {
-            msg.datetime.as_ref()
-        } else {
-            None
+        match *self {
+            Message::Text(ref msg)   => msg.datetime.as_ref(),
+            Message::Image(ref msg)  => Some(&msg.datetime),
+            Message::System(ref msg) => Some(&msg.datetime),
+            Message::Date(_)         => None
         }
     }
 }
@@ -350,8 +351,8 @@ impl TextMessage {
         time.set_name("text-time");
         time.get_style_context().map(|ctx| ctx.add_class("dim-label"));
         if let Some(t) = dt {
-            let tstr = t.format("%T").to_string();
-            time.set_text(&tstr)
+            time.set_text(&t.format("%T").to_string());
+            time.set_tooltip_text(Some(t.format("%F").to_string().as_ref()))
         }
         grid.attach(&time, 2, 0, 1, 1);
 
@@ -398,6 +399,7 @@ impl TextMessage {
         }
         let tstr = dt.format("%T").to_string();
         self.time.set_text(&tstr);
+        self.time.set_tooltip_text(Some(dt.format("%F").to_string().as_ref()));
         self.datetime = Some(dt);
         self.grid.attach(&self.time, 2, 0, 1, 1)
     }
@@ -463,6 +465,7 @@ impl Image {
         time.get_style_context().map(|ctx| ctx.add_class("dim-label"));
         let tstr = dt.format("%T").to_string();
         time.set_text(&tstr);
+        time.set_tooltip_text(Some(dt.format("%F").to_string().as_ref()));
         grid.attach(&time, 2, 0, 1, 1);
 
         img.set_margin_top(6);
@@ -562,7 +565,10 @@ impl DateHeader {
 }
 
 #[derive(Debug, Clone)]
-pub struct SystemMessage { row: gtk::ListBoxRow }
+pub struct SystemMessage {
+    datetime: DateTime<Local>,
+    row:      gtk::ListBoxRow
+}
 
 impl SystemMessage {
     pub fn new(dt: DateTime<Local>, txt: &str) -> SystemMessage {
@@ -578,6 +584,7 @@ impl SystemMessage {
         let hdr = gtk::Label::new(Some("Note"));
         hdr.set_name("system-category");
         hdr.get_style_context().map(|ctx| ctx.add_class("dim-label"));
+        hdr.set_margin_right(6);
         hdr.set_halign(Align::Start);
         hbox.add(&hdr);
 
@@ -591,12 +598,17 @@ impl SystemMessage {
         let time = gtk::Label::new(Some(tstr.as_ref()));
         time.set_name("system-time");
         time.get_style_context().map(|ctx| ctx.add_class("dim-label"));
+        time.set_tooltip_text(Some(dt.format("%F").to_string().as_ref()));
+        time.set_margin_left(6);
         hbox.add(&time);
 
         row.add(&hbox);
         row.show_all();
 
-        SystemMessage { row: row }
+        SystemMessage {
+            datetime: dt,
+            row:      row
+        }
     }
 }
 
